@@ -1,0 +1,12 @@
+{
+  "name": "personal-whatsapp-web-sidecar",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local-only QR authenticated WhatsApp Web bridge for the Django assistant",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "whatsapp-web.js": "1.34.7"
+  }
+}

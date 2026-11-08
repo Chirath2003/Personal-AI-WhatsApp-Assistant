@@ -1,7 +1,4 @@
-import hashlib
-import hmac
 import json
-import os
 from unittest.mock import patch
 from django.test import TestCase, override_settings
 from .models import ActivityLog, Contact, Conversation, Message, Preferences, WhatsAppConnection
@@ -71,25 +68,16 @@ class AssistantApiTests(TestCase):
         response = self.client.post(f"/api/conversations/{conversation.id}/send/", data=json.dumps({"content":"Hello"}), content_type="application/json", HTTP_IDEMPOTENCY_KEY="emergency-stop-1")
         self.assertEqual(response.status_code, 409)
         send_text.assert_not_called()
-    @patch.dict(os.environ, {"WHATSAPP_VERIFY_TOKEN":"verify-me","WHATSAPP_APP_SECRET":"app-secret"})
-    def test_webhook_verification_and_signature_check(self):
-        verified = self.client.get("/api/whatsapp/webhook/?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=hello")
-        self.assertEqual(verified.status_code, 200)
-        self.assertEqual(verified.content, b"hello")
-        invalid = self.client.post("/api/whatsapp/webhook/", data=b"{}", content_type="application/json", HTTP_X_HUB_SIGNATURE_256="sha256=bad")
-        self.assertEqual(invalid.status_code, 403)
-
-    @patch.dict(os.environ, {"WHATSAPP_VERIFY_TOKEN":"verify-me","WHATSAPP_APP_SECRET":"app-secret"})
-    def test_signed_webhook_ingests_once(self):
-        WhatsAppConnection.objects.create(enabled=True)
-        payload = {"object":"whatsapp_business_account","entry":[{"changes":[{"value":{"contacts":[{"wa_id":"94773333333","profile":{"name":"Webhook User"}}],"messages":[{"from":"94773333333","id":"wamid.webhook.1","type":"text","text":{"body":"Hello from webhook"}}]}}]}]}
-        body = json.dumps(payload).encode()
-        sig = "sha256=" + hmac.new(b"app-secret", body, hashlib.sha256).hexdigest()
+    @patch("apps.assistant.provider_views._bridge_token", return_value="test-bridge-token")
+    def test_local_web_bridge_requires_token_and_deduplicates(self, token):
+        payload = {"identifier":"94773333333@c.us","contact_name":"Web User","external_id":"true_9477_test","content":"Hello from WhatsApp Web","type":"TEXT","from_me":False}
+        unauthorized = self.client.post("/api/whatsapp/incoming/", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(unauthorized.status_code, 401)
         for _ in range(2):
-            response = self.client.post("/api/whatsapp/webhook/", data=body, content_type="application/json", HTTP_X_HUB_SIGNATURE_256=sig)
-            self.assertEqual(response.status_code, 200)
-        self.assertEqual(Message.objects.filter(external_id="wamid.webhook.1").count(), 1)
-        self.assertEqual(Contact.objects.get(identifier="94773333333").name, "Webhook User")
+            response = self.client.post("/api/whatsapp/incoming/", data=json.dumps(payload), content_type="application/json", HTTP_X_BRIDGE_TOKEN="test-bridge-token")
+            self.assertIn(response.status_code, (200, 201))
+        self.assertEqual(Message.objects.filter(external_id="true_9477_test").count(), 1)
+        self.assertEqual(Contact.objects.get(identifier="94773333333@c.us").name, "Web User")
 
     @patch("apps.assistant.ai_engine.urllib.request.urlopen")
     def test_ai_is_not_called_without_explicit_sharing_consent(self, openai):

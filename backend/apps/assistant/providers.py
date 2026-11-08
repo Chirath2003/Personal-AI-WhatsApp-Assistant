@@ -1,68 +1,78 @@
+"""Bridge to the local WhatsApp Web sidecar; never connects to Meta APIs."""
 import json
 import os
-import urllib.error
-import urllib.request
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
 
 class ProviderNotConfigured(Exception):
     pass
 
+
 class ProviderError(Exception):
     pass
 
-class WhatsAppCloudAdapter:
-    """Official WhatsApp Business Platform Cloud API adapter."""
+
+class WhatsAppWebAdapter:
     def __init__(self):
-        self.token = os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip()
-        self.phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip()
-        self.version = os.getenv("WHATSAPP_GRAPH_VERSION", "v26.0").strip()
+        self.base_url = os.getenv("WHATSAPP_WEB_URL", "http://127.0.0.1:8765").rstrip("/")
+
+    @property
+    def bridge_token(self):
+        root = Path(__file__).resolve().parents[3]
+        try:
+            return (root / ".run" / "bridge-token").read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
 
     @property
     def configured(self):
-        return bool(self.token and self.phone_id)
+        return bool(self.bridge_token)
 
-    def _request(self, path, *, method="GET", payload=None):
-        if not self.configured:
-            raise ProviderNotConfigured("WhatsApp Cloud API credentials are not configured.")
-        url = f"https://graph.facebook.com/{self.version}/{path.lstrip('/')}"
-        body = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=body, method=method, headers={
-            "Authorization": f"Bearer {self.token}",
+    def _request(self, path, method="GET", payload=None):
+        token = self.bridge_token
+        if not token:
+            raise ProviderNotConfigured("Local WhatsApp bridge token is missing. Start the app with start.ps1.")
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = Request(self.base_url + path, data=body, method=method, headers={
+            "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
         })
         try:
-            with urllib.request.urlopen(req, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
+            with urlopen(req, timeout=8) as response:
+                return json.loads(response.read().decode())
+        except HTTPError as exc:
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "Provider rejected the request")
-            except Exception:
-                detail = "Provider rejected the request"
-            raise ProviderError(f"WhatsApp API returned HTTP {exc.code}: {detail}") from None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            raise ProviderError("Could not confirm the WhatsApp API response. Check connection status before retrying.") from None
+                detail = json.loads(exc.read().decode()).get("error", "WhatsApp Web sidecar rejected the request.")
+            except (ValueError, OSError):
+                detail = "WhatsApp Web sidecar rejected the request."
+            raise ProviderError(detail) from None
+        except (URLError, TimeoutError, OSError, ValueError):
+            raise ProviderError("WhatsApp Web sidecar is unavailable. Start or reconnect the local service.") from None
 
     def status(self):
-        if not self.configured:
-            return {"status": "DISCONNECTED", "configured": False, "detail": "Set the WhatsApp Cloud API values in backend/.env."}
         try:
-            profile = self._request(f"{self.phone_id}?fields=display_phone_number,verified_name")
-            return {"status": "CONNECTED", "configured": True, "detail": "Connected to WhatsApp Business Platform.", "phone": profile.get("display_phone_number", "")}
-        except ProviderNotConfigured:
-            return {"status": "DISCONNECTED", "configured": False, "detail": "WhatsApp Cloud API credentials are not configured."}
+            result = self._request("/status")
+            result["configured"] = True
+            return result
+        except ProviderNotConfigured as exc:
+            return {"status": "DISCONNECTED", "configured": False, "detail": str(exc)}
         except ProviderError as exc:
-            return {"status": "CONNECTION_FAILED", "configured": True, "detail": str(exc)}
+            return {"status": "CONNECTION_FAILED", "configured": self.configured, "detail": str(exc)}
+
+    def connect(self):
+        return self._request("/connect", "POST", {})
+
+    def disconnect(self):
+        return self._request("/disconnect", "POST", {})
 
     def send_text(self, recipient, text):
-        result = self._request(f"{self.phone_id}/messages", method="POST", payload={
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": recipient,
-            "type": "text",
-            "text": {"preview_url": False, "body": text},
-        })
-        messages = result.get("messages", [])
-        if not messages or not messages[0].get("id"):
-            raise ProviderError("Provider response did not include a message ID; verify delivery before retrying.")
-        return messages[0]["id"]
+        jid = recipient if "@" in recipient else "".join(c for c in recipient if c.isdigit()) + "@c.us"
+        result = self._request("/send", "POST", {"recipient": jid, "text": text})
+        if not result.get("id"):
+            raise ProviderError("WhatsApp did not confirm a message ID; check the chat before retrying.")
+        return result["id"]
 
-adapter = WhatsAppCloudAdapter()
+
+adapter = WhatsAppWebAdapter()

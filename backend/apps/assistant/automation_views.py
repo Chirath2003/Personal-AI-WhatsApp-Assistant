@@ -43,7 +43,7 @@ def automation(request):
                 return Response({"error": "Select Smart or Automatic mode before enabling automation."}, status=400)
             connection = WhatsAppConnection.objects.filter(enabled=True).first()
             if not connection:
-                return Response({"error": "Connect WhatsApp Cloud API before enabling automation."}, status=409)
+                return Response({"error": "Link your personal WhatsApp account before enabling automation."}, status=409)
             live = adapter.status()
             if live["status"] != "CONNECTED":
                 return Response({"error": "WhatsApp connection check failed: " + live["detail"]}, status=409)
