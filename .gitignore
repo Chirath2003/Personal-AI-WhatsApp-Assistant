@@ -1,0 +1,10 @@
+node_modules/
+frontend/dist/
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+.env
+.whatsapp-profile/
+
+.run/
