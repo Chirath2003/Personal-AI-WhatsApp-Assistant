@@ -33,11 +33,32 @@ cd ..\..
 
 Open http://127.0.0.1:5173 and choose **Connect WhatsApp** (or **Show / refresh QR code** in Settings). The sidecar stays idle until you click. On your phone open WhatsApp → **Linked devices** → **Link a device**, then scan the displayed QR. The sidecar restores the local session after app restarts; you do not need to scan every time unless WhatsApp expires the linked session. If you remove this linked device from your phone, the sidecar clears the invalid session and requests a fresh QR. Use **Disconnect and remove saved session** to log out and delete the profile. `stop.ps1` stops services but keeps the linked session.
 
+### Remove the saved WhatsApp login
+
+In the app, open **Settings** and choose **Disconnect and remove saved session**. This logs out this app's linked device and deletes its local login profile; connect again and scan a new QR code to link it.
+
+If the app is stuck connecting and you cannot use Settings, stop the services and remove only this app's WhatsApp profile from PowerShell in the project folder:
+
+```powershell
+.\stop.ps1
+$session = Join-Path $env:LOCALAPPDATA 'PersonalAIWhatsAppAssistant\session\session-personal-assistant'
+if (Test-Path -LiteralPath $session) {
+    icacls.exe $session /reset /T /C /Q
+    if ($LASTEXITCODE -ne 0) { throw "Could not reset WhatsApp session permissions." }
+    icacls.exe $session /grant:r "$($env:USERNAME):(OI)(CI)F" /T /C /Q
+    if ($LASTEXITCODE -ne 0) { throw "Could not grant access to the WhatsApp session." }
+    Remove-Item -LiteralPath $session -Recurse -Force
+}
+.\start.ps1
+```
+
+This removes the app's saved linked-device login, not your WhatsApp account or messages. After restarting, choose **Connect WhatsApp** and scan the new QR code from WhatsApp → **Linked devices** → **Link a device**. Running `stop.ps1` alone does not remove the saved login.
+
 The scripts start Django on 127.0.0.1:8000, the assistant worker, Vite on 127.0.0.1:5173, and the authenticated WhatsApp Web sidecar on 127.0.0.1:8765. The sidecar is loopback-only and stays idle until you click **Connect WhatsApp**. Logs and process IDs are written to the ignored `.run/` folder. The bridge token is generated locally in `.run/bridge-token`. The session profile is stored under `%LOCALAPPDATA%\PersonalAIWhatsAppAssistant\session`; the launcher removes inherited ACLs and grants access to the current Windows user. Chromium protects some browser secrets with DPAPI, but the entire profile is not encrypted. Protect your Windows account and device, and do not copy or share the profile directory.
 
-The integration is unofficial. `whatsapp-web.js` drives WhatsApp Web and may break when WhatsApp changes its web client. WhatsApp may log out, restrict, or suspend accounts using unofficial clients or automation. Use at your own discretion. This project does not bypass QR authentication, hide automation, defeat access controls, or use a public tunnel. Keep the app on localhost.
+The integration is unofficial. `whatsapp-web.js` drives WhatsApp Web in its own headless Chromium browser, separate from your regular browser. The linked-device name is reported as Chrome on Windows; it does not use or identify your installed Edge browser. This integration may break when WhatsApp changes its web client. WhatsApp may log out, restrict, or suspend accounts using unofficial clients or automation. Use at your own discretion. This project does not bypass QR authentication, hide automation, defeat access controls, or use a public tunnel. Keep the app on localhost.
 
-If the sidecar logs `Runtime.callFunctionOn timed out`, restart with `stop.ps1` and `start.ps1`. The sidecar allows up to ten minutes for an individual Chromium protocol call because WhatsApp Web can take longer to initialize on accounts with substantial local history. Failed initializations stop and show an error rather than starting repeated background launches. Check `.run/whatsapp-web-error.log`, confirm the computer can reach WhatsApp Web, and retry after closing other Chromium-heavy apps.
+Connect returns as soon as the sidecar starts initializing WhatsApp Web; the UI polls status while Chromium loads, so a slow startup is not reported as a sidecar-unavailable error. If Chromium times out during initialization, the sidecar makes one recovery attempt with a fresh local session and requests a new QR code. This clears the saved linked-device login, so scan the new QR with your phone. If it continues to fail, check `.run/whatsapp-web-error.log`, confirm `web.whatsapp.com` is reachable, close other Chromium-heavy apps, and restart with `stop.ps1` and `start.ps1`.
 
 Run backend checks with `cd backend; .\.venv\Scripts\python.exe manage.py test apps.assistant.tests`. Build the frontend with `cd frontend; npm run build`.
 

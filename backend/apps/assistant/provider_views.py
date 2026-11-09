@@ -85,11 +85,15 @@ def incoming(request):
         return HttpResponse("Unauthorized", status=401)
     try:
         data = json.loads(request.body or b"{}")
-        if data.get("from_me") or not data.get("identifier") or not data.get("external_id"):
+        if data.get("from_me"):
             return HttpResponse("Ignored", status=200)
+        if not data.get("identifier"):
+            return HttpResponse("Missing identifier", status=400)
+        if not data.get("external_id"):
+            return HttpResponse("Missing external message ID", status=400)
         content = str(data.get("content", "")).strip()
         if not content:
-            return HttpResponse("Ignored", status=200)
+            return HttpResponse("Missing message content", status=400)
         try:
             with transaction.atomic():
                 contact, _ = Contact.objects.get_or_create(identifier=str(data["identifier"]), defaults={"name": str(data.get("contact_name") or data["identifier"])[:120]})

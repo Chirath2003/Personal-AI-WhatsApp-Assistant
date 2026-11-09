@@ -1,4 +1,5 @@
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Client, LocalAuth } = require('whatsapp-web.js');
@@ -66,7 +67,7 @@ function postIncoming(data) {
     const body = Buffer.from(JSON.stringify(data));
     const req = http.request({ hostname: '127.0.0.1', port: 8000, path: '/api/whatsapp/incoming/', method: 'POST', headers: {
       'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Bridge-Token': bridgeToken,
-    } }, res => { res.resume(); res.on('end', () => res.statusCode >= 200 && res.statusCode < 300 ? resolve() : reject(new Error(`Local API returned HTTP ${res.statusCode}`))); });
+    } }, res => { let responseBody = ''; res.setEncoding('utf8'); res.on('data', chunk => { responseBody += chunk; }); res.on('end', () => { if (res.statusCode >= 200 && res.statusCode < 300 && responseBody === 'EVENT_RECEIVED') { console.log(`Incoming message stored by local API: HTTP ${res.statusCode}.`); resolve(); } else if (res.statusCode >= 200 && res.statusCode < 300 && responseBody === 'Duplicate') { console.log('WhatsApp resent an already stored message; duplicate ignored.'); resolve(); } else { console.error(`Incoming message not stored: HTTP ${res.statusCode} ${responseBody.slice(0, 180)}`); reject(new Error(`Local API did not store the incoming event (HTTP ${res.statusCode}).`)); } }); });
     req.setTimeout(6000, () => req.destroy(new Error('Local API timed out')));
     req.on('error', reject); req.end(body);
   });
@@ -83,6 +84,9 @@ async function initialize() {
     // WhatsApp Web can take several minutes to initialize large/older accounts.
     // Puppeteer's default 180s CDP timeout was aborting during page evaluation.
     puppeteer: { headless: true, protocolTimeout: 600000, timeout: 120000 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    deviceName: 'Windows',
+    browserName: 'Chrome',
     webVersionCache: { type: 'none' },
     takeoverOnConflict: false,
   });
@@ -106,15 +110,23 @@ async function initialize() {
     scheduleReconnect(instance, 5000);
   });
   instance.on('message', async message => {
-    if (message.fromMe || !/@(?:c\.us|lid)$/.test(message.from || '') || message.from === 'status@broadcast') return;
+    const from = String(message.from || 'unknown');
+    const type = message.type === 'chat' ? 'TEXT' : String(message.type || 'other').toUpperCase().slice(0, 24);
+    console.log(`WhatsApp message event: from=${from} fromMe=${Boolean(message.fromMe)} type=${type}.`);
+    if (message.fromMe || !/@(?:c\.us|lid)$/.test(from) || from === 'status@broadcast') {
+      console.log(`WhatsApp message event skipped: from=${from} fromMe=${Boolean(message.fromMe)}.`);
+      return;
+    }
     try {
       let contact = {};
       try { contact = await message.getContact(); } catch {}
       const content = (message.body || '').trim();
-      const type = message.type === 'chat' ? 'TEXT' : String(message.type || 'other').toUpperCase().slice(0, 24);
+      const receivedAt = message.timestamp || message._data?.t || message._data?.timestamp || Math.floor(Date.now() / 1000);
+      const rawId = message.id?._serialized || message.id?.id || message._data?.id?._serialized || message._data?.id?.id;
+      const externalId = rawId ? String(rawId) : `fallback-${crypto.createHash('sha256').update(`${from}\0${receivedAt}\0${type}\0${content}`).digest('hex')}`;
       await postIncoming({
-        identifier: message.from, contact_name: contact.pushname || contact.name || message.from,
-        external_id: message.id?._serialized, content: content || `[${type.toLowerCase()} message received]`,
+        identifier: from, contact_name: contact.pushname || contact.name || from,
+        external_id: externalId, timestamp: receivedAt, content: content || `[${type.toLowerCase()} message received]`,
         type, from_me: false,
       });
     } catch (error) { console.error(`Incoming message handoff failed: ${cleanError(error)}`); }
@@ -151,6 +163,15 @@ async function initialize() {
         scheduleReconnect(instance, 2000);
         return;
       }
+      if (/Runtime\.callFunctionOn timed out/i.test(String(error?.message || error)) && !socketRecoveryUsed) {
+        socketRecoveryUsed = true;
+        clearSessionOnRetry = true;
+        qr = null;
+        setState('CONNECTING', 'WhatsApp Web did not respond during startup. Resetting the saved local session and retrying once for a fresh QR.');
+        console.error('WhatsApp Web initialization timed out; retrying once with a fresh local session.');
+        scheduleReconnect(instance, 2000);
+        return;
+      }
       client = null; qr = null;
       setState('CONNECTION_FAILED', `Could not start WhatsApp Web: ${cleanError(error)}. Check connectivity and select Connect WhatsApp to retry.`);
       try { await instance.destroy(); } catch {}
@@ -164,7 +185,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/status') return json(res, 200, { status, detail, qr, connected: status === 'CONNECTED' });
     if (req.method === 'POST' && req.url === '/connect') {
-      await initialize();
+      initialize().catch(error => {
+        console.error(error?.stack || `WhatsApp Web initialization failed: ${cleanError(error)}`);
+        client = null; qr = null; initPending = false;
+        setState('CONNECTION_FAILED', `Could not start WhatsApp Web: ${cleanError(error)}. Check connectivity and select Connect WhatsApp to retry.`);
+      });
       return json(res, 200, { status, detail, qr, connected: status === 'CONNECTED' });
     }
     if (req.method === 'POST' && req.url === '/disconnect') {
